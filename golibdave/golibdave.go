@@ -2,6 +2,7 @@ package golibdave
 
 import (
 	"log/slog"
+	"errors"
 
 	"github.com/disgoorg/godave"
 	"github.com/disgoorg/godave/libdave"
@@ -78,12 +79,18 @@ func (s *session) MaxDecryptedFrameSize(userID godave.UserID, frameSize int) int
 }
 
 func (s *session) Decrypt(userID godave.UserID, frame []byte, decryptedFrame []byte) (int, error) {
-	if decryptor, ok := s.decryptors[userID]; ok {
-		return decryptor.Decrypt(libdave.MediaTypeAudio, frame, decryptedFrame)
-	}
-
-	// assume passthrough
-	return copy(frame, decryptedFrame), nil
+    if decryptor, ok := s.decryptors[userID]; ok {
+        n, err := decryptor.Decrypt(libdave.MediaTypeAudio, frame, decryptedFrame)
+        if err != nil {
+            // Key ratchet not yet set up — fall back to passthrough
+            if errors.Is(err, libdave.ErrMissingKeyRatchet) {
+                return copy(frame, decryptedFrame), nil
+            }
+            return 0, err
+        }
+        return n, nil
+    }
+    return copy(frame, decryptedFrame), nil
 }
 
 func (s *session) AddUser(userID godave.UserID) {
