@@ -6,3 +6,5 @@ require (
 	github.com/disgoorg/godave v0.1.0
 	github.com/disgoorg/godave/libdave v0.1.0
 )
+
+replace github.com/disgoorg/godave/libdave => ../libdave

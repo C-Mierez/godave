@@ -1,8 +1,9 @@
 package golibdave
 
 import (
-	"log/slog"
 	"errors"
+	"fmt"
+	"log/slog"
 
 	"github.com/disgoorg/godave"
 	"github.com/disgoorg/godave/libdave"
@@ -87,7 +88,29 @@ func (s *session) Decrypt(userID godave.UserID, frame []byte, decryptedFrame []b
 		slog.Int("num_decryptors", len(s.decryptors)),
 	)
 	if decryptor, ok := s.decryptors[userID]; ok {
+		// Log decryptor stats BEFORE decryption attempt
+		statsBefore := decryptor.GetStats(libdave.MediaTypeAudio)
+		s.logger.Debug("Decrypt: decryptor stats before",
+			slog.String("userID", string(userID)),
+			slog.Uint64("successCount", statsBefore.DecryptSuccessCount),
+			slog.Uint64("failureCount", statsBefore.DecryptFailureCount),
+			slog.Uint64("missingKeyCount", statsBefore.DecryptMissingKeyCount),
+			slog.Uint64("invalidNonceCount", statsBefore.DecryptInvalidNonceCount),
+		)
+
 		n, err := decryptor.Decrypt(libdave.MediaTypeAudio, frame, decryptedFrame)
+
+		// Log decryptor stats AFTER decryption attempt
+		statsAfter := decryptor.GetStats(libdave.MediaTypeAudio)
+		s.logger.Debug("Decrypt: decryptor stats after",
+			slog.String("userID", string(userID)),
+			slog.Uint64("successCount", statsAfter.DecryptSuccessCount),
+			slog.Uint64("failureCount", statsAfter.DecryptFailureCount),
+			slog.Uint64("missingKeyCount", statsAfter.DecryptMissingKeyCount),
+			slog.Uint64("invalidNonceCount", statsAfter.DecryptInvalidNonceCount),
+			slog.Any("err", err),
+		)
+
 		if err != nil {
 			// Key ratchet not yet set up — fall back to passthrough
 			if errors.Is(err, libdave.ErrMissingKeyRatchet) {
@@ -97,9 +120,13 @@ func (s *session) Decrypt(userID godave.UserID, frame []byte, decryptedFrame []b
 				)
 				return copy(frame, decryptedFrame), nil
 			}
+			// Log what specific error type it is
 			s.logger.Error("Decrypt: error for known user",
 				slog.String("userID", string(userID)),
 				slog.Any("err", err),
+				slog.Bool("isErrMissingKeyRatchet", errors.Is(err, libdave.ErrMissingKeyRatchet)),
+				slog.Bool("isErrInvalidNonce", errors.Is(err, libdave.ErrInvalidNonce)),
+				slog.Bool("isErrMissingCryptor", errors.Is(err, libdave.ErrMissingCryptor)),
 			)
 			return 0, err
 		}
@@ -303,10 +330,12 @@ func (s *session) setupKeyRatchetForUser(userID godave.UserID, protocolVersion u
 	if userID == s.selfUserID {
 		s.encryptor.SetPassthroughMode(disabled)
 		if !disabled {
-			s.encryptor.SetKeyRatchet(s.session.GetKeyRatchet(string(userID)))
+			kr := s.session.GetKeyRatchet(string(userID))
 			s.logger.Info("setupKeyRatchetForUser: bot encryptor key ratchet SET",
 				slog.String("userID", string(userID)),
+				slog.Any("keyRatchet_ptr", fmt.Sprintf("%p", kr)),
 			)
+			s.encryptor.SetKeyRatchet(kr)
 		}
 		return
 	}
@@ -314,10 +343,12 @@ func (s *session) setupKeyRatchetForUser(userID godave.UserID, protocolVersion u
 	decryptor := s.decryptors[userID]
 	decryptor.TransitionToPassthroughMode(disabled)
 	if !disabled {
-		decryptor.TransitionToKeyRatchet(s.session.GetKeyRatchet(string(userID)))
+		kr := s.session.GetKeyRatchet(string(userID))
 		s.logger.Info("setupKeyRatchetForUser: user decryptor key ratchet SET",
 			slog.String("userID", string(userID)),
+			slog.Any("keyRatchet_ptr", fmt.Sprintf("%p", kr)),
 		)
+		decryptor.TransitionToKeyRatchet(kr)
 	}
 }
 
