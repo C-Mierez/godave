@@ -79,21 +79,44 @@ func (s *session) MaxDecryptedFrameSize(userID godave.UserID, frameSize int) int
 }
 
 func (s *session) Decrypt(userID godave.UserID, frame []byte, decryptedFrame []byte) (int, error) {
-    if decryptor, ok := s.decryptors[userID]; ok {
-        n, err := decryptor.Decrypt(libdave.MediaTypeAudio, frame, decryptedFrame)
-        if err != nil {
-            // Key ratchet not yet set up — fall back to passthrough
-            if errors.Is(err, libdave.ErrMissingKeyRatchet) {
-                return copy(frame, decryptedFrame), nil
-            }
-            return 0, err
-        }
-        return n, nil
-    }
-    return copy(frame, decryptedFrame), nil
+	s.logger.Debug("Decrypt called",
+		slog.String("userID", string(userID)),
+		slog.Bool("userID_empty", userID == ""),
+		slog.Int("frame_len", len(frame)),
+		slog.Int("decryptedFrame_cap", cap(decryptedFrame)),
+		slog.Int("num_decryptors", len(s.decryptors)),
+	)
+	if decryptor, ok := s.decryptors[userID]; ok {
+		n, err := decryptor.Decrypt(libdave.MediaTypeAudio, frame, decryptedFrame)
+		if err != nil {
+			// Key ratchet not yet set up — fall back to passthrough
+			if errors.Is(err, libdave.ErrMissingKeyRatchet) {
+				s.logger.Warn("Decrypt: ErrMissingKeyRatchet for known user, falling back to passthrough",
+					slog.String("userID", string(userID)),
+					slog.Int("frame_len", len(frame)),
+				)
+				return copy(frame, decryptedFrame), nil
+			}
+			s.logger.Error("Decrypt: error for known user",
+				slog.String("userID", string(userID)),
+				slog.Any("err", err),
+			)
+			return 0, err
+		}
+		return n, nil
+	}
+	s.logger.Debug("Decrypt: unknown userID, falling back to passthrough",
+		slog.String("userID", string(userID)),
+	)
+	return copy(frame, decryptedFrame), nil
 }
 
 func (s *session) AddUser(userID godave.UserID) {
+	s.logger.Debug("AddUser called",
+		slog.String("userID", string(userID)),
+		slog.Any("lastPreparedTransitionVersion", s.lastPreparedTransitionVersion),
+		slog.Int("num_prepared_transitions", len(s.preparedTransitions)),
+	)
 	s.decryptors[userID] = libdave.NewDecryptor()
 	s.setupKeyRatchetForUser(userID, s.lastPreparedTransitionVersion)
 }
@@ -158,14 +181,24 @@ func (s *session) OnDaveMLSPrepareCommitTransition(transitionID uint16, commitMe
 }
 
 func (s *session) OnDaveMLSWelcome(transitionID uint16, welcomeMessage []byte) {
+	s.logger.Debug("OnDaveMLSWelcome called",
+		slog.Any("transitionID", transitionID),
+		slog.Int("welcomeMessage_len", len(welcomeMessage)),
+		slog.Int("num_recognized_users", len(s.recognizedUserIDs())),
+	)
 	res := s.session.ProcessWelcome(welcomeMessage, s.recognizedUserIDs())
 
 	if res == nil {
+		s.logger.Warn("OnDaveMLSWelcome: ProcessWelcome returned nil, sending invalid commit")
 		s.sendInvalidCommitWelcome(transitionID)
 		s.sendMLSKeyPackage()
 		return
 	}
 
+	s.logger.Info("OnDaveMLSWelcome: ProcessWelcome succeeded, calling prepareTransition",
+		slog.Any("transitionID", transitionID),
+		slog.Any("protocolVersion", s.session.GetProtocolVersion()),
+	)
 	s.prepareTransition(transitionID, s.session.GetProtocolVersion())
 	if transitionID != initTransitionId {
 		s.sendReadyForTransition(transitionID)
@@ -204,7 +237,17 @@ func (s *session) prepareEpoch(epoch int, protocolVersion uint16) {
 
 func (s *session) executeTransition(transitionID uint16) {
 	protocolVersion, ok := s.preparedTransitions[transitionID]
+	s.logger.Debug("executeTransition called",
+		slog.Any("transitionID", transitionID),
+		slog.Bool("transition_prepared", ok),
+		slog.Any("protocolVersion", protocolVersion),
+		slog.String("selfUserID", string(s.selfUserID)),
+		slog.Int("num_decryptors", len(s.decryptors)),
+	)
 	if !ok {
+		s.logger.Warn("executeTransition: transition NOT prepared, returning early (NO KEY RATCHET SET)",
+			slog.Any("transitionID", transitionID),
+		)
 		return
 	}
 
@@ -212,12 +255,23 @@ func (s *session) executeTransition(transitionID uint16) {
 
 	if protocolVersion == disabledProtocolVersion {
 		s.session.Reset()
+		s.logger.Debug("executeTransition: disabled protocol, reset session")
 	}
 
 	s.setupKeyRatchetForUser(s.selfUserID, protocolVersion)
+	s.logger.Info("executeTransition complete: bot key ratchet set",
+		slog.Any("transitionID", transitionID),
+		slog.Any("protocolVersion", protocolVersion),
+	)
 }
 
 func (s *session) prepareTransition(transitionID uint16, protocolVersion uint16) {
+	s.logger.Debug("prepareTransition called",
+		slog.Any("transitionID", transitionID),
+		slog.Any("protocolVersion", protocolVersion),
+		slog.Int("num_decryptors", len(s.decryptors)),
+		slog.Bool("is_init_transition", transitionID == initTransitionId),
+	)
 	for userID := range s.decryptors {
 		s.setupKeyRatchetForUser(userID, protocolVersion)
 	}
@@ -226,6 +280,10 @@ func (s *session) prepareTransition(transitionID uint16, protocolVersion uint16)
 		s.setupKeyRatchetForUser(s.selfUserID, protocolVersion)
 	} else {
 		s.preparedTransitions[transitionID] = protocolVersion
+		s.logger.Info("prepareTransition: stored non-init transition for later execute",
+			slog.Any("transitionID", transitionID),
+			slog.Any("protocolVersion", protocolVersion),
+		)
 	}
 
 	s.lastPreparedTransitionVersion = protocolVersion
@@ -233,11 +291,22 @@ func (s *session) prepareTransition(transitionID uint16, protocolVersion uint16)
 
 func (s *session) setupKeyRatchetForUser(userID godave.UserID, protocolVersion uint16) {
 	disabled := protocolVersion == disabledProtocolVersion
+	isSelf := userID == s.selfUserID
+
+	s.logger.Debug("setupKeyRatchetForUser called",
+		slog.String("userID", string(userID)),
+		slog.Bool("is_self", isSelf),
+		slog.Bool("disabled", disabled),
+		slog.Any("protocolVersion", protocolVersion),
+	)
 
 	if userID == s.selfUserID {
 		s.encryptor.SetPassthroughMode(disabled)
 		if !disabled {
 			s.encryptor.SetKeyRatchet(s.session.GetKeyRatchet(string(userID)))
+			s.logger.Info("setupKeyRatchetForUser: bot encryptor key ratchet SET",
+				slog.String("userID", string(userID)),
+			)
 		}
 		return
 	}
@@ -246,6 +315,9 @@ func (s *session) setupKeyRatchetForUser(userID godave.UserID, protocolVersion u
 	decryptor.TransitionToPassthroughMode(disabled)
 	if !disabled {
 		decryptor.TransitionToKeyRatchet(s.session.GetKeyRatchet(string(userID)))
+		s.logger.Info("setupKeyRatchetForUser: user decryptor key ratchet SET",
+			slog.String("userID", string(userID)),
+		)
 	}
 }
 

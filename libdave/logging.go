@@ -16,7 +16,7 @@ var (
 )
 
 func init() {
-	SetDefaultLogLoggerLevel(slog.LevelError)
+	SetDefaultLogLoggerLevel(slog.LevelDebug) // DEBUG: changed from LevelError to see !BADKEY messages
 	SetDefaultLogger(slog.New(newLogWrapper(slog.Default().Handler())).
 		With(slog.String("name", "libdave")),
 	)
