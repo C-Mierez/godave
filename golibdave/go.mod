@@ -7,4 +7,4 @@ require (
 	github.com/disgoorg/godave/libdave v0.1.0
 )
 
-replace github.com/disgoorg/godave/libdave => ../libdave
+replace github.com/disgoorg/godave/libdave => github.com/C-Mierez/godave/libdave v0.0.0-20260531000748-ca6c3035b53b
